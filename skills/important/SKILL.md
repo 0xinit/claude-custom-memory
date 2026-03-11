@@ -1,58 +1,53 @@
 ---
 name: important
-description: "Flag the last N messages in the current session as important for long-term recall. Use when the user wants to save critical context, decisions, or breakthroughs."
+description: "Flag the last N messages as important for the current project. Saves to project-scoped memory."
 ---
 
 # Flag Important Context
 
-When the user invokes `/important`, extract and persist the most critical recent context.
+When the user invokes `/important`, extract and persist critical context to the current project's memory.
 
 ## Behavior
 
-1. Determine the current session's transcript path from the environment or session context
+1. Determine the current project name from the working directory
 2. Run the memory daemon's important extractor:
 
 ```bash
-python3 ~/.claude/memory/memory-daemon.py --important --n 10
+python3 ~/.claude/memory/memory-daemon.py --important --project-dir "$(pwd)" --n 10
 ```
 
 If you have access to the transcript path, pass it:
 
 ```bash
-python3 ~/.claude/memory/memory-daemon.py --important --transcript "$TRANSCRIPT_PATH" --n 10
+python3 ~/.claude/memory/memory-daemon.py --important --transcript "$TRANSCRIPT_PATH" --project-dir "$(pwd)" --n 10
 ```
 
-3. Confirm to the user what was saved
+3. Confirm to the user what was saved and where
 
-## Optional Arguments
+## Arguments
 
-The user can specify how many messages to flag:
+- `/important` — flag last 10 messages
+- `/important 20` — flag last 20 messages
+- `/important 5` — flag last 5 messages
 
-- `/important` — default last 10 messages
-- `/important 20` — last 20 messages
-- `/important 5` — last 5 messages
+Parse the number from the argument and pass via `--n`.
 
-Parse the number from the argument and pass it via `--n`.
+## Where It Saves
+
+Project-scoped (default):
+```
+<project-dir>/<project-name>-memory/<project-name>-important-memory.md
+```
+
+Falls back to global (`~/.claude/memory/important-memory.md`) if the project directory can't be determined.
 
 ## When to Use
 
-- User made a key architectural decision
-- A hard bug was solved and the user wants to remember the fix
-- Important deployment details (addresses, chains, configs)
+- Key architectural decision made
+- Hard bug solved
+- Deployment details (addresses, chains, configs)
 - User explicitly says "remember this" or "save this"
 
-## What Gets Saved
-
-The daemon extracts from the flagged messages:
-- User requests (truncated to 300 chars)
-- Assistant key responses (truncated to 500 chars)
-- Files changed
-- Tools used
-- Timestamp and project name
-- A "Flagged as important by user" marker
-
-Saved to `~/.claude/memory/important.md`, newest first.
-
-## Loading Important Memory Later
+## After Flagging
 
 Tell the user: "Use `/custom-memory load important` in a future session to recall this."

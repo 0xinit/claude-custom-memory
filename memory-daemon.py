@@ -2,7 +2,10 @@
 """
 Claude Custom Memory Daemon
 Extracts conversation context from Claude Code sessions and maintains
-long-term and short-term memory files.
+project-scoped and global memory files.
+
+Project memory:  <project-dir>/<project-name>-memory/<project-name>-{long,short,important}-memory.md
+Global memory:   ~/.claude/memory/{long,short,important}-memory.md
 
 Run via cron or manually: python3 memory-daemon.py [--config path/to/memory.conf]
 
@@ -13,19 +16,14 @@ import json
 import os
 import re
 import sys
-import glob
 import time
 import hashlib
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
-MEMORY_DIR = Path.home() / ".claude" / "memory"
-LONG_MEMORY = MEMORY_DIR / "long-memory.md"
-SHORT_MEMORY = MEMORY_DIR / "short-memory.md"
-IMPORTANT_MEMORY = MEMORY_DIR / "important.md"
-SESSION_CACHE = MEMORY_DIR / ".session-cache"
-STATE_FILE = MEMORY_DIR / ".daemon-state.json"
+GLOBAL_MEMORY_DIR = Path.home() / ".claude" / "memory"
+STATE_FILE = GLOBAL_MEMORY_DIR / ".daemon-state.json"
 
 DEFAULT_CONFIG = {
     "interval_hours": 1,
@@ -34,6 +32,23 @@ DEFAULT_CONFIG = {
     "summarize": False,
     "important_max_messages": 10,
 }
+
+TAG_RE = re.compile(r"<[^>]+>")
+HEADER_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
+
+NOISE_PATTERNS = [
+    "Caveat: The messages below were generated",
+    "DO NOT respond to these messages",
+    "/exit",
+    "Bye!",
+    "Claude Code diagnostics",
+    "system-reminder",
+    "local-command-stdout",
+    "local-command-caveat",
+    "command-name",
+    "command-message",
+    "command-args",
+]
 
 
 def load_config(config_path=None):
@@ -148,8 +163,6 @@ def extract_message(entry):
                         fp = tool_input.get("file_path", "")
                         if fp:
                             files_changed.append(fp)
-                elif block.get("type") == "tool_result":
-                    pass
 
         combined = "\n".join(t for t in texts if t.strip())
         if combined or tool_uses:
@@ -162,24 +175,6 @@ def extract_message(entry):
             }
 
     return None
-
-
-TAG_RE = re.compile(r"<[^>]+>")
-HEADER_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
-
-NOISE_PATTERNS = [
-    "Caveat: The messages below were generated",
-    "DO NOT respond to these messages",
-    "/exit",
-    "Bye!",
-    "Claude Code diagnostics",
-    "system-reminder",
-    "local-command-stdout",
-    "local-command-caveat",
-    "command-name",
-    "command-message",
-    "command-args",
-]
 
 
 def sanitize_text(text):
@@ -289,80 +284,110 @@ def format_memory_entry(messages, session_id, project_name):
     return "\n".join(lines)
 
 
-def extract_project_name(transcript_path):
-    """Derive project name from transcript path."""
+def extract_project_info(transcript_path):
+    """Derive project name and project directory from transcript path.
+
+    Claude stores transcripts at:
+      ~/.claude/projects/-Users-name-path-to-project/session.jsonl
+
+    The folder name encodes the absolute path with dashes, but directory names
+    with hyphens/underscores make naive decoding unreliable. Instead, we
+    progressively reconstruct the path by testing which segments exist on disk.
+    """
     parts = Path(transcript_path).parts
     for i, part in enumerate(parts):
         if part == "projects" and i + 1 < len(parts):
             raw = parts[i + 1]
-            # Claude stores as -Users-name-path-to-project
             if raw.startswith("-"):
-                segments = raw.strip("-").split("-")
-                if len(segments) >= 3:
-                    return segments[-1]
-                return raw
-            return raw
-    return "unknown-project"
+                segments = raw.lstrip("-").split("-")
+
+                # Greedily reconstruct path by joining segments and checking existence
+                resolved = Path("/")
+                remaining = segments[:]
+
+                while remaining:
+                    found = False
+                    # Try joining progressively more segments (longest match first)
+                    for end in range(len(remaining), 0, -1):
+                        # Try common separators: hyphen, underscore, and direct join
+                        for sep in ["-", "_", ""]:
+                            candidate = sep.join(remaining[:end])
+                            test_path = resolved / candidate
+                            if test_path.exists():
+                                resolved = test_path
+                                remaining = remaining[end:]
+                                found = True
+                                break
+                        if found:
+                            break
+
+                    if not found:
+                        # Can't resolve further — use what we have
+                        break
+
+                if resolved.exists() and resolved.is_dir() and str(resolved) != "/":
+                    return resolved.name, str(resolved)
+
+                # Fallback: last segment of raw encoding
+                return segments[-1], None
+            return raw, None
+    return "unknown-project", None
 
 
-def update_long_memory(new_entries, max_entries):
-    """Append new entries to long-memory.md, respecting max entry count."""
-    LONG_MEMORY.parent.mkdir(parents=True, exist_ok=True)
+def write_memory_file(filepath, header, new_entries, max_entries=None):
+    """Write or append entries to a memory markdown file."""
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     existing = ""
-    if LONG_MEMORY.exists():
-        existing = LONG_MEMORY.read_text()
-
-    header = "# Long-Term Memory\n\n> Auto-generated by claude-custom-memory daemon. Do not edit manually.\n> Load with: `/custom-memory load long`\n\n"
+    if filepath.exists():
+        existing = filepath.read_text()
 
     existing_entries = existing.split("\n## ")[1:] if "\n## " in existing else []
     new_entry_blocks = new_entries.split("\n## ")[1:] if "\n## " in new_entries else []
 
     all_entries = new_entry_blocks + existing_entries
-    all_entries = all_entries[:max_entries]
+    if max_entries:
+        all_entries = all_entries[:max_entries]
 
     body = "\n## ".join(all_entries)
     if body:
         body = "\n## " + body
 
-    LONG_MEMORY.write_text(header + body)
+    filepath.write_text(header + body)
 
 
-def update_short_memory(transcripts, hours, state):
-    """Rebuild short-memory.md from transcripts within the time window."""
-    SHORT_MEMORY.parent.mkdir(parents=True, exist_ok=True)
+def build_short_memory(transcripts, hours, project_name=None, project_dir=None):
+    """Build short memory content from recent transcripts."""
     cutoff = time.time() - (hours * 3600)
-
-    recent_transcripts = [t for t in transcripts if t["modified"] >= cutoff]
+    recent = [t for t in transcripts if t["modified"] >= cutoff]
 
     entries = []
-    for t in recent_transcripts:
+    for t in recent:
+        t_project, _ = extract_project_info(t["path"])
+
+        # If project-scoped, only include matching transcripts
+        if project_name and t_project != project_name:
+            continue
+
         messages = parse_transcript(t["path"])
         if not messages:
             continue
 
         session_id = Path(t["path"]).stem
-        project = extract_project_name(t["path"])
-        entry = format_memory_entry(messages, session_id, project)
+        entry = format_memory_entry(messages, session_id, t_project)
         if entry:
             entries.append(entry)
 
-    header = (
-        "# Short-Term Memory\n\n"
-        f"> Rolling {hours}-hour window. Auto-refreshed by claude-custom-memory daemon.\n"
-        "> Load with: `/custom-memory load short`\n\n"
-    )
-
-    SHORT_MEMORY.write_text(header + "\n".join(entries))
+    return "\n".join(entries)
 
 
 def run_daemon(config_path=None):
-    """Main daemon entry point."""
+    """Main daemon entry point. Writes both project-scoped and global memory."""
     config = load_config(config_path)
     state = load_state()
 
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    SESSION_CACHE.mkdir(parents=True, exist_ok=True)
+    GLOBAL_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
     transcripts = find_transcript_files()
     if not transcripts:
@@ -371,11 +396,20 @@ def run_daemon(config_path=None):
         return
 
     processed = state.get("processed_sessions", {})
-    new_entries = []
+
+    # Group transcripts by project
+    project_entries = {}  # project_name -> {"dir": path, "entries": [], "transcripts": []}
+    global_entries = []
 
     for t in transcripts:
         file_hash = compute_file_hash(t["path"])
         session_id = Path(t["path"]).stem
+        project_name, project_dir = extract_project_info(t["path"])
+
+        # Track all transcripts per project (for short memory rebuild)
+        if project_name not in project_entries:
+            project_entries[project_name] = {"dir": project_dir, "entries": [], "transcripts": []}
+        project_entries[project_name]["transcripts"].append(t)
 
         if processed.get(session_id) == file_hash:
             continue
@@ -384,18 +418,68 @@ def run_daemon(config_path=None):
         if not messages:
             continue
 
-        project = extract_project_name(t["path"])
-        entry = format_memory_entry(messages, session_id, project)
+        entry = format_memory_entry(messages, session_id, project_name)
         if entry:
-            new_entries.append(entry)
+            project_entries[project_name]["entries"].append(entry)
+            global_entries.append(entry)
 
         processed[session_id] = file_hash
 
-    if new_entries:
-        combined = "\n".join(new_entries)
-        update_long_memory(combined, config["long_memory_max_entries"])
+    # --- Write project-scoped memory ---
+    for proj_name, proj_data in project_entries.items():
+        proj_dir = proj_data["dir"]
+        if not proj_dir or not Path(proj_dir).exists():
+            continue
 
-    update_short_memory(transcripts, config["short_memory_hours"], state)
+        memory_dir = Path(proj_dir) / f"{proj_name}-memory"
+
+        # Long memory (project)
+        if proj_data["entries"]:
+            long_header = (
+                f"# {proj_name} — Long-Term Memory\n\n"
+                f"> Auto-generated by claude-custom-memory daemon. Do not edit manually.\n"
+                f"> Load with: `/custom-memory load long`\n\n"
+            )
+            long_file = memory_dir / f"{proj_name}-long-memory.md"
+            write_memory_file(long_file, long_header, "\n".join(proj_data["entries"]), config["long_memory_max_entries"])
+
+        # Short memory (project)
+        short_content = build_short_memory(proj_data["transcripts"], config["short_memory_hours"])
+        if short_content:
+            short_header = (
+                f"# {proj_name} — Short-Term Memory\n\n"
+                f"> Rolling {config['short_memory_hours']}-hour window. Auto-refreshed by daemon.\n"
+                f"> Load with: `/custom-memory load short`\n\n"
+            )
+            short_file = memory_dir / f"{proj_name}-short-memory.md"
+            short_file.parent.mkdir(parents=True, exist_ok=True)
+            short_file.write_text(short_header + short_content)
+
+    # --- Write global memory ---
+
+    # Global long memory
+    if global_entries:
+        global_long_header = (
+            "# Global Long-Term Memory\n\n"
+            "> All projects, all sessions. Auto-generated by claude-custom-memory daemon.\n"
+            "> Load with: `/custom-memory all load long`\n\n"
+        )
+        write_memory_file(
+            GLOBAL_MEMORY_DIR / "long-memory.md",
+            global_long_header,
+            "\n".join(global_entries),
+            config["long_memory_max_entries"],
+        )
+
+    # Global short memory
+    global_short_content = build_short_memory(transcripts, config["short_memory_hours"])
+    global_short_header = (
+        "# Global Short-Term Memory\n\n"
+        f"> Rolling {config['short_memory_hours']}-hour window, all projects.\n"
+        "> Load with: `/custom-memory all load short`\n\n"
+    )
+    global_short_file = GLOBAL_MEMORY_DIR / "short-memory.md"
+    global_short_file.write_text(global_short_header + global_short_content)
 
     # Prune old session hashes (keep last 200)
     if len(processed) > 200:
@@ -407,13 +491,11 @@ def run_daemon(config_path=None):
     save_state(state)
 
 
-def extract_important(transcript_path=None, n_messages=10):
+def extract_important(transcript_path=None, n_messages=10, project_dir=None):
     """
-    Extract last N messages from current/latest session and append to important.md.
-    Called by the /important skill via: python3 memory-daemon.py --important [--transcript PATH] [--n 10]
+    Extract last N messages and write to project-scoped important memory.
+    Falls back to global if project dir can't be determined.
     """
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-
     if transcript_path and os.path.exists(transcript_path):
         path = transcript_path
     else:
@@ -430,26 +512,49 @@ def extract_important(transcript_path=None, n_messages=10):
 
     tail = messages[-n_messages:]
     session_id = Path(path).stem
-    project = extract_project_name(path)
+    project_name, detected_dir = extract_project_info(path)
 
-    entry = format_memory_entry(tail, session_id, project)
+    entry = format_memory_entry(tail, session_id, project_name)
     if not entry:
         print("No meaningful content in last messages.")
         return
 
-    # Tag as user-flagged
     entry = entry.replace("\n---\n", "\n**Flagged as important by user**\n\n---\n", 1)
 
-    header = "# Important Memory\n\n> User-flagged important moments. Load with: `/custom-memory load important`\n\n"
+    # Determine where to write
+    target_dir = project_dir or detected_dir
+    if target_dir and Path(target_dir).exists():
+        memory_dir = Path(target_dir) / f"{project_name}-memory"
+        important_file = memory_dir / f"{project_name}-important-memory.md"
+        header = (
+            f"# {project_name} — Important Memory\n\n"
+            f"> User-flagged important moments.\n"
+            f"> Load with: `/custom-memory load important`\n\n"
+        )
+    else:
+        important_file = GLOBAL_MEMORY_DIR / "important-memory.md"
+        header = (
+            "# Important Memory\n\n"
+            "> User-flagged important moments.\n"
+            "> Load with: `/custom-memory all load important`\n\n"
+        )
+
+    important_file.parent.mkdir(parents=True, exist_ok=True)
 
     existing = ""
-    if IMPORTANT_MEMORY.exists():
-        existing = IMPORTANT_MEMORY.read_text()
-        if existing.startswith("# Important Memory"):
-            existing = existing[existing.index("\n\n", existing.index("\n\n") + 2) + 2:]
+    if important_file.exists():
+        existing = important_file.read_text()
+        # Strip existing header
+        marker = "\n\n---"
+        first_entry = existing.find("\n## ")
+        if first_entry > 0:
+            existing = existing[first_entry:]
+        else:
+            existing = ""
 
-    IMPORTANT_MEMORY.write_text(header + entry + existing)
-    print(f"Flagged last {len(tail)} messages as important from {project}.")
+    important_file.write_text(header + entry + existing)
+    print(f"Flagged last {len(tail)} messages as important for {project_name}.")
+    print(f"Saved to: {important_file}")
 
 
 def status():
@@ -458,15 +563,34 @@ def status():
     last = state.get("last_run", "never")
     sessions = len(state.get("processed_sessions", {}))
 
-    long_size = LONG_MEMORY.stat().st_size if LONG_MEMORY.exists() else 0
-    short_size = SHORT_MEMORY.stat().st_size if SHORT_MEMORY.exists() else 0
-    imp_size = IMPORTANT_MEMORY.stat().st_size if IMPORTANT_MEMORY.exists() else 0
-
-    print(f"Last run: {last}")
+    print(f"Last run:         {last}")
     print(f"Sessions tracked: {sessions}")
-    print(f"Long memory:  {long_size:,} bytes")
-    print(f"Short memory: {short_size:,} bytes")
-    print(f"Important:    {imp_size:,} bytes")
+    print()
+
+    # Global memory
+    print("Global memory (~/.claude/memory/):")
+    for name in ["long-memory.md", "short-memory.md", "important-memory.md"]:
+        f = GLOBAL_MEMORY_DIR / name
+        size = f.stat().st_size if f.exists() else 0
+        print(f"  {name}: {size:,} bytes")
+
+    # Find project memories
+    print()
+    print("Project memories:")
+    projects_dir = Path.home() / ".claude" / "projects"
+    if projects_dir.exists():
+        seen = set()
+        for jsonl in projects_dir.rglob("*.jsonl"):
+            proj_name, proj_dir = extract_project_info(str(jsonl))
+            if proj_name in seen or not proj_dir:
+                continue
+            seen.add(proj_name)
+
+            memory_dir = Path(proj_dir) / f"{proj_name}-memory"
+            if memory_dir.exists():
+                files = list(memory_dir.glob("*.md"))
+                total = sum(f.stat().st_size for f in files)
+                print(f"  {proj_name}: {len(files)} files, {total:,} bytes ({memory_dir})")
 
 
 def main():
@@ -474,6 +598,7 @@ def main():
     parser.add_argument("--config", help="Path to memory.conf", default=None)
     parser.add_argument("--important", action="store_true", help="Flag last N messages as important")
     parser.add_argument("--transcript", help="Transcript path (for --important)", default=None)
+    parser.add_argument("--project-dir", help="Project directory (for --important)", default=None)
     parser.add_argument("--n", type=int, default=10, help="Number of messages for --important")
     parser.add_argument("--status", action="store_true", help="Print daemon status")
     parser.add_argument("--run", action="store_true", help="Run the daemon (default if no flags)")
@@ -481,7 +606,7 @@ def main():
     args = parser.parse_args()
 
     if args.important:
-        extract_important(args.transcript, args.n)
+        extract_important(args.transcript, args.n, args.project_dir)
     elif args.status:
         status()
     else:

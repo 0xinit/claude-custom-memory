@@ -3,16 +3,20 @@
 # Claude Custom Memory — Installer
 # Sets up memory daemon, skills, and cron job.
 #
+# Supports two install modes:
+#   1. Clone:  git clone ... && bash install.sh
+#   2. Curl:   curl -fsSL https://raw.githubusercontent.com/0xinit/claude-custom-memory/main/install.sh | bash
+#
 # Usage: bash install.sh [--interval HOURS]
 #
 # SPDX-License-Identifier: MIT
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 MEMORY_DIR="$CLAUDE_DIR/memory"
 SKILLS_DIR="$CLAUDE_DIR/skills"
+REPO_URL="https://raw.githubusercontent.com/0xinit/claude-custom-memory/main"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,6 +28,31 @@ info()  { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 error() { echo -e "${RED}✗${NC} $1"; }
 header(){ echo -e "\n${BOLD}$1${NC}"; }
+
+# Detect install mode: local clone or remote curl
+IS_LOCAL=false
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" ]] && [[ "${BASH_SOURCE[0]}" != "bash" ]]; then
+  CANDIDATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  if [[ -f "$CANDIDATE/memory-daemon.py" ]]; then
+    IS_LOCAL=true
+    SCRIPT_DIR="$CANDIDATE"
+  fi
+fi
+
+fetch_file() {
+  local rel_path="$1"
+  local dest="$2"
+
+  if $IS_LOCAL; then
+    cp "$SCRIPT_DIR/$rel_path" "$dest"
+  else
+    if ! curl -fsSL "$REPO_URL/$rel_path" -o "$dest"; then
+      error "Failed to download $rel_path"
+      exit 1
+    fi
+  fi
+}
 
 INTERVAL_HOURS=""
 
@@ -68,22 +97,32 @@ if ! command -v crontab &>/dev/null; then
 fi
 info "crontab available"
 
+if ! $IS_LOCAL && ! command -v curl &>/dev/null; then
+  error "curl is required for remote install."
+  exit 1
+fi
+
 if [[ ! -d "$CLAUDE_DIR" ]]; then
   error "~/.claude/ not found. Is Claude Code installed?"
   exit 1
 fi
 info "~/.claude/ exists"
 
+if $IS_LOCAL; then
+  info "Install mode: local (cloned repo)"
+else
+  info "Install mode: remote (downloading from GitHub)"
+fi
+
 # --- Read config for interval ---
 
 if [[ -z "$INTERVAL_HOURS" ]]; then
-  if [[ -f "$SCRIPT_DIR/memory.conf" ]]; then
+  if $IS_LOCAL && [[ -f "$SCRIPT_DIR/memory.conf" ]]; then
     INTERVAL_HOURS=$(grep -E "^interval_hours=" "$SCRIPT_DIR/memory.conf" | cut -d= -f2 | tr -d ' ' || echo "1")
   fi
   INTERVAL_HOURS="${INTERVAL_HOURS:-1}"
 fi
 
-# Validate interval
 if ! [[ "$INTERVAL_HOURS" =~ ^[0-9]+$ ]] || [[ "$INTERVAL_HOURS" -lt 1 ]]; then
   error "Invalid interval: $INTERVAL_HOURS (must be a positive integer)"
   exit 1
@@ -95,37 +134,30 @@ header "Setting up directories..."
 
 mkdir -p "$MEMORY_DIR"
 mkdir -p "$MEMORY_DIR/.session-cache"
-info "Created $MEMORY_DIR"
+mkdir -p "$SKILLS_DIR/custom-memory"
+mkdir -p "$SKILLS_DIR/important"
+info "Created directories"
 
-# --- Copy files ---
+# --- Install files ---
 
 header "Installing files..."
 
-cp "$SCRIPT_DIR/memory-daemon.py" "$MEMORY_DIR/memory-daemon.py"
+fetch_file "memory-daemon.py" "$MEMORY_DIR/memory-daemon.py"
 chmod +x "$MEMORY_DIR/memory-daemon.py"
 info "Installed memory-daemon.py"
 
-cp "$SCRIPT_DIR/memory.conf" "$MEMORY_DIR/memory.conf"
+fetch_file "memory.conf" "$MEMORY_DIR/memory.conf"
 info "Installed memory.conf"
 
 # --- Install skills ---
 
 header "Installing skills..."
 
-if [[ -d "$SKILLS_DIR" ]]; then
-  # custom-memory skill
-  mkdir -p "$SKILLS_DIR/custom-memory"
-  cp "$SCRIPT_DIR/skills/custom-memory/SKILL.md" "$SKILLS_DIR/custom-memory/SKILL.md"
-  info "Installed /custom-memory skill"
+fetch_file "skills/custom-memory/SKILL.md" "$SKILLS_DIR/custom-memory/SKILL.md"
+info "Installed /custom-memory skill"
 
-  # important skill
-  mkdir -p "$SKILLS_DIR/important"
-  cp "$SCRIPT_DIR/skills/important/SKILL.md" "$SKILLS_DIR/important/SKILL.md"
-  info "Installed /important skill"
-else
-  warn "~/.claude/skills/ not found — skills not installed"
-  warn "Create it manually: mkdir -p ~/.claude/skills"
-fi
+fetch_file "skills/important/SKILL.md" "$SKILLS_DIR/important/SKILL.md"
+info "Installed /important skill"
 
 # --- Set up cron ---
 
@@ -136,24 +168,19 @@ CRON_MARKER="# claude-custom-memory"
 
 EXISTING_CRON=$(crontab -l 2>/dev/null || true)
 
+if [[ "$INTERVAL_HOURS" -eq 1 ]]; then
+  CRON_SCHEDULE="0 * * * *"
+else
+  CRON_SCHEDULE="0 */${INTERVAL_HOURS} * * *"
+fi
+
 if echo "$EXISTING_CRON" | grep -qF "$CRON_MARKER"; then
-  # Replace existing entry
   NEW_CRON=$(echo "$EXISTING_CRON" | grep -vF "$CRON_MARKER")
-  if [[ "$INTERVAL_HOURS" -eq 1 ]]; then
-    CRON_SCHEDULE="0 * * * *"
-  else
-    CRON_SCHEDULE="0 */${INTERVAL_HOURS} * * *"
-  fi
   NEW_CRON="${NEW_CRON}
 ${CRON_SCHEDULE} ${CRON_CMD} ${CRON_MARKER}"
   echo "$NEW_CRON" | crontab -
   info "Updated existing cron entry"
 else
-  if [[ "$INTERVAL_HOURS" -eq 1 ]]; then
-    CRON_SCHEDULE="0 * * * *"
-  else
-    CRON_SCHEDULE="0 */${INTERVAL_HOURS} * * *"
-  fi
   (echo "$EXISTING_CRON"; echo "${CRON_SCHEDULE} ${CRON_CMD} ${CRON_MARKER}") | crontab -
   info "Added cron entry"
 fi
@@ -180,16 +207,24 @@ fi
 
 header "Installation complete!"
 echo ""
-echo "  Memory dir:    $MEMORY_DIR"
+echo "  Installed to:  $MEMORY_DIR"
 echo "  Cron interval: every ${INTERVAL_HOURS} hour(s)"
 echo "  Config:        $MEMORY_DIR/memory.conf"
 echo ""
-echo "  Skills installed:"
-echo "    /custom-memory  — load long|short|important|all memory"
-echo "    /important      — flag last N messages as important"
+echo "  What was installed:"
+echo "    ~/.claude/memory/memory-daemon.py   — cron daemon"
+echo "    ~/.claude/memory/memory.conf        — configuration"
+echo "    ~/.claude/skills/custom-memory/     — /custom-memory skill"
+echo "    ~/.claude/skills/important/         — /important skill"
+echo ""
+echo "  Usage in Claude Code:"
+echo "    /custom-memory load short    — recent work (rolling window)"
+echo "    /custom-memory load long     — full history"
+echo "    /custom-memory load important— user-flagged moments"
+echo "    /important                   — flag current context"
 echo ""
 echo "  Manual commands:"
-echo "    python3 $MEMORY_DIR/memory-daemon.py              # run daemon now"
+echo "    python3 $MEMORY_DIR/memory-daemon.py              # run now"
 echo "    python3 $MEMORY_DIR/memory-daemon.py --status     # check status"
 echo "    python3 $MEMORY_DIR/memory-daemon.py --important  # flag important"
 echo ""
@@ -198,8 +233,6 @@ if [[ "$ERRORS" -gt 0 ]]; then
   error "$ERRORS error(s) during installation"
   exit 1
 fi
-
-# --- Uninstall instructions ---
 
 echo "  To uninstall:"
 echo "    crontab -l | grep -v 'claude-custom-memory' | crontab -"
