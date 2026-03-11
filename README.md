@@ -7,18 +7,18 @@ A cron-powered daemon that reads your Claude Code transcripts and maintains stru
 ## How It Works
 
 ```
-┌─────────────┐     cron      ┌──────────────────┐     writes     ┌─────────────────────────┐
-│   Claude     │ ──────────── │  memory-daemon.py │ ────────────── │  Per-project:            │
-│   Transcripts│   (hourly)   │                   │                │  myproject/                │
-│   (.jsonl)   │              │  Groups by project│                │  └─ myproject-memory/      │
-└─────────────┘              │  Writes per-project│                │     ├─ myproject-long.md   │
-                              │  Writes global     │                │     └─ myproject-short.md  │
-                              └──────────────────┘                │                           │
-                                                                   │  Global:                  │
-                                                                   │  ~/.claude/memory/        │
-                                                                   │  ├─ long-memory.md        │
-                                                                   │  └─ short-memory.md       │
-                                                                   └─────────────────────────┘
+┌──────────────┐            ┌────────────────────┐            ┌─────────────────────────────┐
+│ Claude       │    cron    │ memory-daemon.py   │   writes   │ Per-project:                │
+│ Transcripts  │ ─────────► │                    │ ────────►  │ myproject/                  │
+│ (.jsonl)     │  (hourly)  │ Groups by project  │            │ └─ myproject-memory/        │
+└──────────────┘            │ Writes per-project │            │    ├─ myproject-long.md     │
+                            │ Writes global      │            │    └─ myproject-short.md    │
+                            └────────────────────┘            │                             │
+                                                              │ Global:                     │
+                                                              │ ~/.claude/memory/           │
+                                                              │ ├─ long-memory.md           │
+                                                              │ └─ short-memory.md          │
+                                                              └─────────────────────────────┘
 ```
 
 ## Install
