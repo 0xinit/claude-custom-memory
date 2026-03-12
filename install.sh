@@ -149,6 +149,10 @@ info "Installed memory-daemon.py"
 fetch_file "memory.conf" "$MEMORY_DIR/memory.conf"
 info "Installed memory.conf"
 
+fetch_file "memory-status.py" "$MEMORY_DIR/memory-status.py"
+chmod +x "$MEMORY_DIR/memory-status.py"
+info "Installed memory-status.py"
+
 # --- Install skills ---
 
 header "Installing skills..."
@@ -193,6 +197,7 @@ ERRORS=0
 
 [[ -f "$MEMORY_DIR/memory-daemon.py" ]] && info "memory-daemon.py ✓" || { error "memory-daemon.py missing"; ERRORS=$((ERRORS+1)); }
 [[ -f "$MEMORY_DIR/memory.conf" ]] && info "memory.conf ✓" || { error "memory.conf missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$MEMORY_DIR/memory-status.py" ]] && info "memory-status.py ✓" || { warn "memory-status.py not installed"; }
 [[ -f "$SKILLS_DIR/custom-memory/SKILL.md" ]] && info "/custom-memory skill ✓" || { warn "/custom-memory skill not installed"; }
 [[ -f "$SKILLS_DIR/important/SKILL.md" ]] && info "/important skill ✓" || { warn "/important skill not installed"; }
 
@@ -213,6 +218,7 @@ echo "  Config:        $MEMORY_DIR/memory.conf"
 echo ""
 echo "  What was installed:"
 echo "    ~/.claude/memory/memory-daemon.py   — cron daemon"
+echo "    ~/.claude/memory/memory-status.py   — status dashboard"
 echo "    ~/.claude/memory/memory.conf        — configuration"
 echo "    ~/.claude/skills/custom-memory/     — /custom-memory skill"
 echo "    ~/.claude/skills/important/         — /important skill"
@@ -227,6 +233,8 @@ echo "  Manual commands:"
 echo "    python3 $MEMORY_DIR/memory-daemon.py              # run now"
 echo "    python3 $MEMORY_DIR/memory-daemon.py --status     # check status"
 echo "    python3 $MEMORY_DIR/memory-daemon.py --important  # flag important"
+echo "    python3 $MEMORY_DIR/memory-status.py              # dashboard"
+echo "    python3 $MEMORY_DIR/memory-status.py -p <name>    # project detail"
 echo ""
 
 if [[ "$ERRORS" -gt 0 ]]; then

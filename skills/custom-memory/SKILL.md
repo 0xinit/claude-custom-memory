@@ -18,6 +18,8 @@ Memory is stored in the current project directory under `<project-name>-memory/`
 | `/custom-memory load important` | `<project>-memory/<project>-important-memory.md` — flagged moments |
 | `/custom-memory load all` | All three project memory files |
 | `/custom-memory status` | Daemon status (project + global) |
+| `/custom-memory dashboard` | Full dashboard — all projects, sizes, entries, freshness |
+| `/custom-memory dashboard <name>` | Deep dive into a specific project's memory |
 | `/custom-memory refresh` | Manually trigger daemon |
 
 ## Global Memory (all projects)
@@ -55,6 +57,24 @@ Tell the user: "No memory recorded yet for this project. Run `python3 ~/.claude/
 ### `/custom-memory status`:
 
 Run: `python3 ~/.claude/memory/memory-daemon.py --status`
+
+### `/custom-memory dashboard`:
+
+Run: `python3 ~/.claude/memory/memory-status.py`
+
+Shows all projects, their memory sizes, entry counts, and when each was last updated.
+
+### `/custom-memory dashboard <name>`:
+
+Run: `python3 ~/.claude/memory/memory-status.py --project <name>`
+
+Deep dive into one project — shows each memory type's size, entries, last updated, and a preview of the latest entry. Supports fuzzy matching on the project name.
+
+### `/custom-memory dashboard --global`:
+
+Run: `python3 ~/.claude/memory/memory-status.py --global`
+
+Shows global memory detail across all projects.
 
 ### `/custom-memory refresh`:
 
