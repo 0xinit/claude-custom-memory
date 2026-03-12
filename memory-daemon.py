@@ -382,6 +382,21 @@ def build_short_memory(transcripts, hours, project_name=None, project_dir=None):
     return "\n".join(entries)
 
 
+def ensure_gitignore(proj_dir, pattern):
+    """Add pattern to .gitignore if the project has one and pattern is missing."""
+    gitignore = proj_dir / ".gitignore"
+    if not gitignore.exists():
+        return
+    try:
+        content = gitignore.read_text()
+        if pattern in content:
+            return
+        sep = "" if content.endswith("\n") else "\n"
+        gitignore.write_text(content + sep + pattern + "\n")
+    except (OSError, PermissionError):
+        pass
+
+
 def run_daemon(config_path=None):
     """Main daemon entry point. Writes both project-scoped and global memory."""
     config = load_config(config_path)
@@ -432,6 +447,7 @@ def run_daemon(config_path=None):
             continue
 
         memory_dir = Path(proj_dir) / f"{proj_name}-memory"
+        ensure_gitignore(Path(proj_dir), f"{proj_name}-memory/")
 
         try:
             # Long memory (project)
